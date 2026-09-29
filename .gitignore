@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+graph.html
+
+# eval run outputs (baseline.json is committed; individual runs are not)
+evals/runs/

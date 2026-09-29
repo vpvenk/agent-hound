@@ -1,0 +1,223 @@
+[
+  {
+    "id": "inc-001",
+    "input": {
+      "incident": {"tenant_id": "tenant-acme", "signal": "freshness_breach", "table": "analytics.daily_revenue", "capability_level": "L2"},
+      "evidence": [
+        {"id": "ev-1", "source": "monitor", "summary": "analytics.daily_revenue last updated 31h ago; freshness SLA is 26h"},
+        {"id": "ev-2", "source": "lineage", "summary": "analytics.daily_revenue is built from raw.orders, loaded by job orders_load"},
+        {"id": "ev-3", "source": "job_history", "summary": "orders_load failed at 02:14 UTC: 'SQL access control error: 401 Unauthorized' connecting to Snowflake as svc_orders"},
+        {"id": "ev-4", "source": "credential_store", "summary": "svc_orders key-pair credential expired 2026-09-27 00:00 UTC; no rotation recorded"}
+      ]
+    },
+    "expected": {
+      "root_cause": "The svc_orders service credential expired, so orders_load could not authenticate to Snowflake and raw.orders was never loaded.",
+      "next_steps": ["Rotate the svc_orders credential", "Re-run orders_load", "Rebuild analytics.daily_revenue"],
+      "key_evidence": ["ev-3", "ev-4"]
+    },
+    "metadata": {"difficulty": "easy", "trap": "none; the canonical case"},
+    "probes": {
+      "human_correct": "login token for the orders loader lapsed",
+      "fluent_wrong": "The freshness breach stems from sustained Snowflake warehouse contention during the 02:00 UTC batch window, which caused orders_load to exceed its connection timeout and abort before committing data to raw.orders."
+    }
+  },
+  {
+    "id": "inc-002",
+    "input": {
+      "incident": {"tenant_id": "tenant-acme", "signal": "job_failure", "table": "staging.stg_opportunities", "capability_level": "L3"},
+      "evidence": [
+        {"id": "ev-1", "source": "monitor", "summary": "dbt model stg_opportunities failed in the 06:00 run"},
+        {"id": "ev-2", "source": "job_history", "summary": "dbt error: column \"amount\" does not exist in raw.salesforce_opportunity"},
+        {"id": "ev-3", "source": "schema_history", "summary": "raw.salesforce_opportunity: column amount dropped and column amount_usd added at 04:12 UTC by Fivetran sync"},
+        {"id": "ev-4", "source": "lineage", "summary": "stg_opportunities feeds 6 downstream models including fct_pipeline"}
+      ]
+    },
+    "expected": {
+      "root_cause": "The upstream Salesforce source renamed the amount column to amount_usd, and stg_opportunities still selects the old column name.",
+      "next_steps": ["Update stg_opportunities to select amount_usd", "Re-run stg_opportunities and its 6 downstream models"],
+      "key_evidence": ["ev-2", "ev-3"]
+    },
+    "metadata": {"difficulty": "easy", "trap": "none; schema drift"},
+    "probes": {
+      "human_correct": "salesforce renamed amount -> amount_usd, dbt model still uses old name",
+      "fluent_wrong": "stg_opportunities failed because the Fivetran Salesforce connector sync was interrupted mid-run, leaving raw.salesforce_opportunity in a partially written state that the dbt model could not read."
+    }
+  },
+  {
+    "id": "inc-003",
+    "input": {
+      "incident": {"tenant_id": "tenant-globex", "signal": "row_count_anomaly", "table": "raw.shopify_orders", "capability_level": "L2"},
+      "evidence": [
+        {"id": "ev-1", "source": "monitor", "summary": "raw.shopify_orders loaded 1,204 rows today vs 30-day median 21,880 (-94%)"},
+        {"id": "ev-2", "source": "job_history", "summary": "Fivetran shopify connector sync status: SUCCEEDED at 03:40 UTC"},
+        {"id": "ev-3", "source": "connector_logs", "summary": "shopify connector received HTTP 429 rate limit responses from page 4 onward; sync marked complete after retries exhausted"},
+        {"id": "ev-4", "source": "case_files", "summary": "No prior incidents on this table in the last 90 days"}
+      ]
+    },
+    "expected": {
+      "root_cause": "The Shopify API rate-limited the connector (HTTP 429), so the extract stopped after a few pages but the sync still reported success, loading only a fraction of the orders.",
+      "next_steps": ["Trigger a re-sync of the Shopify connector", "Lower connector request rate or ask Shopify for a higher limit", "Alert on 429s even when sync status is SUCCEEDED"],
+      "key_evidence": ["ev-1", "ev-3"]
+    },
+    "metadata": {"difficulty": "medium", "trap": "the job reports SUCCEEDED; the failure is only in the connector logs"},
+    "probes": {
+      "human_correct": "shopify throttled us (429s) and the sync quit early but said it succeeded",
+      "fluent_wrong": "The 94% drop reflects a genuine decline in order volume, most likely driven by a storefront outage or a seasonal lull; the connector completed successfully, so the data is accurate."
+    }
+  },
+  {
+    "id": "inc-004",
+    "input": {
+      "incident": {"tenant_id": "tenant-globex", "signal": "job_duration_anomaly", "table": "marts.fct_sessions", "capability_level": "L3"},
+      "evidence": [
+        {"id": "ev-1", "source": "monitor", "summary": "dbt model fct_sessions took 4h12m vs typical 58m"},
+        {"id": "ev-2", "source": "query_profile", "summary": "fct_sessions main query spilled 410 GB to remote storage"},
+        {"id": "ev-3", "source": "config_history", "summary": "warehouse ANALYTICS_WH resized from LARGE to XSMALL on 2026-09-26 by terraform apply (PR #812 'cost cuts')"},
+        {"id": "ev-4", "source": "row_counts", "summary": "input table events row count flat week over week (+1.2%)"}
+      ]
+    },
+    "expected": {
+      "root_cause": "ANALYTICS_WH was downsized from LARGE to XSMALL in a cost-cutting change, so the fct_sessions query no longer fits in memory and spills heavily.",
+      "next_steps": ["Restore ANALYTICS_WH to LARGE or run fct_sessions on a larger warehouse", "Review PR #812 with its author"],
+      "key_evidence": ["ev-2", "ev-3"]
+    },
+    "metadata": {"difficulty": "medium", "trap": "flat input volume rules out a data-growth explanation"},
+    "probes": {
+      "human_correct": "someone shrank the warehouse to XS",
+      "fluent_wrong": "fct_sessions slowed down because growth in the events table has pushed the model past the point where its incremental strategy is efficient, causing large spills that call for re-partitioning."
+    }
+  },
+  {
+    "id": "inc-005",
+    "input": {
+      "incident": {"tenant_id": "tenant-initech", "signal": "freshness_breach", "table": "finance.gl_summary", "capability_level": "L2"},
+      "evidence": [
+        {"id": "ev-1", "source": "monitor", "summary": "finance.gl_summary not updated in 40h; SLA 24h"},
+        {"id": "ev-2", "source": "change_log", "summary": "Credentials for svc_finance were rotated yesterday at 17:30 UTC; all 14 dependent jobs re-authenticated successfully"},
+        {"id": "ev-3", "source": "orchestrator", "summary": "Airflow DAG gl_daily is_paused=true, paused by user j.doe at 18:02 UTC yesterday"},
+        {"id": "ev-4", "source": "job_history", "summary": "No gl_daily runs have been scheduled since 18:02 UTC yesterday; no failed runs"}
+      ]
+    },
+    "expected": {
+      "root_cause": "The gl_daily Airflow DAG was manually paused by j.doe, so no runs have been scheduled; nothing failed.",
+      "next_steps": ["Confirm with j.doe why gl_daily was paused", "Unpause gl_daily and trigger a catch-up run"],
+      "key_evidence": ["ev-3", "ev-4"]
+    },
+    "metadata": {"difficulty": "hard", "trap": "red herring: a credential rotation right before the breach, which evidence shows succeeded"},
+    "probes": {
+      "human_correct": "j.doe paused the DAG",
+      "fluent_wrong": "The breach traces back to yesterday's svc_finance credential rotation at 17:30 UTC; gl_daily likely cached the old credential and has been unable to authenticate since the change."
+    }
+  },
+  {
+    "id": "inc-006",
+    "input": {
+      "incident": {"tenant_id": "tenant-initech", "signal": "null_rate_spike", "table": "core.dim_customers", "capability_level": "L2"},
+      "evidence": [
+        {"id": "ev-1", "source": "monitor", "summary": "core.dim_customers.email null rate 38% today vs 0.1% baseline"},
+        {"id": "ev-2", "source": "lineage", "summary": "dim_customers.email comes from app_db.users.email via the users_sync job"},
+        {"id": "ev-3", "source": "job_history", "summary": "users_sync succeeded; row count normal"},
+        {"id": "ev-4", "source": "release_notes", "summary": "app release 7.3 (deployed 2026-09-28) made email optional on signup to support phone-only accounts"}
+      ]
+    },
+    "expected": {
+      "root_cause": "App release 7.3 made email optional at signup, so new phone-only users have no email; the pipeline is working correctly.",
+      "next_steps": ["Confirm with the app team that null emails are now expected", "Update the dim_customers not-null expectation for email", "Check downstream consumers that assume email is present"],
+      "key_evidence": ["ev-4"]
+    },
+    "metadata": {"difficulty": "medium", "trap": "no pipeline failure at all; the data change is intentional upstream"},
+    "probes": {
+      "human_correct": "product change: email is optional now, nulls are real",
+      "fluent_wrong": "The null spike indicates that users_sync is mis-mapping the email column after a recent connector update, dropping values during the load into dim_customers."
+    }
+  },
+  {
+    "id": "inc-007",
+    "input": {
+      "incident": {"tenant_id": "tenant-acme", "signal": "duplicate_rows", "table": "finance.fct_payments", "capability_level": "L3"},
+      "evidence": [
+        {"id": "ev-1", "source": "monitor", "summary": "finance.fct_payments has 18,442 duplicate payment_id values from the 2026-09-28 batch"},
+        {"id": "ev-2", "source": "job_history", "summary": "ADF pipeline payments_copy attempt 1 timed out after writing, attempt 2 succeeded"},
+        {"id": "ev-3", "source": "pipeline_config", "summary": "payments_copy copy activity sink write behavior: insert (append), no upsert key"},
+        {"id": "ev-4", "source": "row_counts", "summary": "2026-09-28 batch row count is exactly 2x the source extract"}
+      ]
+    },
+    "expected": {
+      "root_cause": "payments_copy wrote the batch, timed out, and was retried; because the sink appends without an upsert key, the retry loaded the same batch a second time.",
+      "next_steps": ["Delete the duplicated 2026-09-28 rows", "Switch the sink to upsert on payment_id or truncate the partition before load"],
+      "key_evidence": ["ev-2", "ev-3", "ev-4"]
+    },
+    "metadata": {"difficulty": "easy", "trap": "none; non-idempotent retry"},
+    "probes": {
+      "human_correct": "retry double-loaded the batch because the copy just appends",
+      "fluent_wrong": "The duplicates originate in the upstream payments system, which emitted each payment event twice during a failover; the pipeline faithfully reproduced the duplicated source records."
+    }
+  },
+  {
+    "id": "inc-008",
+    "input": {
+      "incident": {"tenant_id": "tenant-globex", "signal": "job_failure", "table": "ml.features_daily", "capability_level": "L3"},
+      "evidence": [
+        {"id": "ev-1", "source": "monitor", "summary": "Databricks job features_daily failed"},
+        {"id": "ev-2", "source": "job_history", "summary": "features_daily driver crashed: java.lang.OutOfMemoryError: Java heap space"},
+        {"id": "ev-3", "source": "row_counts", "summary": "features_daily input rows 312M today vs 104M typical"},
+        {"id": "ev-4", "source": "change_log", "summary": "Backfill of Q2 events into raw.events started 2026-09-28 by data-eng (ticket DE-441)"},
+        {"id": "ev-5", "source": "config_history", "summary": "features_daily cluster config unchanged for 60 days"}
+      ]
+    },
+    "expected": {
+      "root_cause": "A Q2 backfill into raw.events tripled the input volume for features_daily, and the unchanged cluster's driver ran out of memory.",
+      "next_steps": ["Run features_daily on a larger driver until the backfill is done, or exclude backfilled partitions", "Coordinate with data-eng on DE-441"],
+      "key_evidence": ["ev-2", "ev-3", "ev-4"]
+    },
+    "metadata": {"difficulty": "medium", "trap": "the OOM is the symptom; the backfill is the cause"},
+    "probes": {
+      "human_correct": "the Q2 backfill 3x'd the input and the driver OOM'd",
+      "fluent_wrong": "features_daily failed due to a memory leak in the job's feature-engineering code, which accumulates state on the driver across partitions until the heap is exhausted."
+    }
+  },
+  {
+    "id": "inc-009",
+    "input": {
+      "incident": {"tenant_id": "tenant-initech", "signal": "row_count_anomaly", "table": "ops.inventory_snapshot", "capability_level": "L1"},
+      "evidence": [
+        {"id": "ev-1", "source": "monitor", "summary": "ops.inventory_snapshot has 3,100 rows vs typical 48,000"},
+        {"id": "ev-2", "source": "job_history", "summary": "Control-M job INV_EXTRACT (upstream) finished at 07:55; normally finishes by 04:30"},
+        {"id": "ev-3", "source": "job_history", "summary": "inventory_snapshot load ran on its fixed 05:00 schedule and succeeded"},
+        {"id": "ev-4", "source": "orchestrator", "summary": "inventory_snapshot has a time trigger only; no dependency on INV_EXTRACT"}
+      ]
+    },
+    "expected": {
+      "root_cause": "INV_EXTRACT ran over three hours late, and inventory_snapshot loaded on its fixed 05:00 schedule with no dependency on it, so it picked up a partial extract.",
+      "next_steps": ["Re-run inventory_snapshot now that INV_EXTRACT has finished", "Make inventory_snapshot depend on INV_EXTRACT instead of a fixed time"],
+      "key_evidence": ["ev-2", "ev-3", "ev-4"]
+    },
+    "metadata": {"difficulty": "hard", "trap": "every job succeeded; the cause is a missing dependency, not an error"},
+    "probes": {
+      "human_correct": "downstream ran at 5 on a timer before the late upstream extract finished",
+      "fluent_wrong": "The low row count is caused by the inventory_snapshot load filtering out records with a malformed warehouse_id introduced in the latest extract format."
+    }
+  },
+  {
+    "id": "inc-010",
+    "input": {
+      "incident": {"tenant_id": "tenant-acme", "signal": "test_failure", "table": "staging.stg_orders", "capability_level": "L3"},
+      "evidence": [
+        {"id": "ev-1", "source": "monitor", "summary": "dbt test accepted_values_stg_orders_order_status failed with 212 rows"},
+        {"id": "ev-2", "source": "test_results", "summary": "failing rows all have order_status = 'partially_refunded'"},
+        {"id": "ev-3", "source": "source_profile", "summary": "'partially_refunded' first appears in raw.orders on 2026-09-28; value not seen in prior 365 days"},
+        {"id": "ev-4", "source": "lineage", "summary": "stg_orders feeds fct_revenue, which buckets revenue by order_status"}
+      ]
+    },
+    "expected": {
+      "root_cause": "The source system introduced a new order_status value, 'partially_refunded', which the accepted_values test does not allow.",
+      "next_steps": ["Confirm the new status with the source owner", "Add 'partially_refunded' to accepted values and handle it in fct_revenue bucketing"],
+      "key_evidence": ["ev-2", "ev-3"]
+    },
+    "metadata": {"difficulty": "easy", "trap": "none; new enum value"},
+    "probes": {
+      "human_correct": "new status value partially_refunded showed up in the source",
+      "fluent_wrong": "The test failure is caused by a bug in stg_orders' CASE expression that mislabels refunded orders, producing an invalid order_status value during transformation."
+    }
+  }
+]

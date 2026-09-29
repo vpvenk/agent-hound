@@ -1,0 +1,21 @@
+{
+  "from_run": "keyword__judge-none__20260929T200208",
+  "settings": {
+    "reasoner": "keyword",
+    "model": "claude-opus-5",
+    "prompt": "v1",
+    "judge": "none",
+    "judge_model": "claude-opus-5",
+    "limit": "None",
+    "name": "None",
+    "gate": "False",
+    "tolerance": "0.0",
+    "set_baseline": "True"
+  },
+  "metrics": {
+    "citation_check": 1.0,
+    "root_cause_levenshtein": 0.2094,
+    "citation_pass_rate": 1.0,
+    "errored_rows": 0
+  }
+}

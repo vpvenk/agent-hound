@@ -1,0 +1,32 @@
+name: evals
+
+on: [pull_request]
+
+jobs:
+  # Free and deterministic: proves the harness still produces cited plans and the scorers still work.
+  offline-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - run: uv run python scripts/run_evals.py --reasoner keyword --gate
+
+  # The gate that blocks a bad prompt change. Needs ANTHROPIC_API_KEY as a repo secret and
+  # a baseline from an accepted run:
+  #   uv run python scripts/run_evals.py --reasoner claude --judge claude \
+  #     --baseline evals/baseline_claude.json --set-baseline
+  claude-gate:
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      BRAINTRUST_API_KEY: ${{ secrets.BRAINTRUST_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - if: env.ANTHROPIC_API_KEY != ''
+        run: uv sync
+      - if: env.ANTHROPIC_API_KEY != ''  # skipped on forks / before the secret exists
+        run: >
+          uv run python scripts/run_evals.py --reasoner claude --judge claude
+          --baseline evals/baseline_claude.json --gate --tolerance 0.05
