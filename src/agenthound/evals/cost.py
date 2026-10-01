@@ -12,6 +12,7 @@ PRICES = {
     "claude-opus-5-5": (4.00, 20.00),
     "claude-sonnet-5": (2.00, 10.00),
     "claude-haiku-4-5": (1.00, 5.00),
+    "jev": (0.042, 0.00),  # TypeSafe list price; output is free
 }
 
 _totals: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0, 0])  # in, out, calls

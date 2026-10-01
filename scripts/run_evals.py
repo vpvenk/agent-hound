@@ -3,6 +3,7 @@
   uv run python scripts/run_evals.py                          # offline: keyword reasoner, no judge
   uv run python scripts/run_evals.py --reasoner keyword-nocite # break it, watch citation_check drop
   uv run python scripts/run_evals.py --reasoner claude --judge claude
+  uv run --extra julia python scripts/run_evals.py --checker julia   # + yes/no plan rubric, local
   uv run python scripts/run_evals.py --gate                    # CI: exit 1 if worse than evals/baseline.json
   uv run python scripts/run_evals.py --set-baseline            # accept this run as the new bar
 
@@ -38,8 +39,23 @@ def build_reasoner(args):
     return ClaudeReasoner(model=args.model, prompt=args.prompt)
 
 
+def build_checker(args):
+    if args.checker == "julia":
+        from agenthound.evals.checker import JuliaChecker
+
+        return JuliaChecker(args.julia_checkpoint)
+    if args.checker == "jev":
+        from agenthound.evals.checker import JevChecker
+
+        return JevChecker(args.jev_model)
+    return None
+
+
 def build_scorers(args) -> list:
     chosen = [scorers.citation_check, scorers.root_cause_levenshtein]
+    checker = build_checker(args)
+    if checker is not None:
+        chosen.append(scorers.RubricScorer(checker))
     if args.judge == "claude":
         chosen.append(scorers.ClaudeJudge(model=args.judge_model))
     elif args.judge == "autoevals":
@@ -93,6 +109,11 @@ def main():
     p.add_argument("--prompt", choices=["v1", "v0-broken"], default="v1", help="reasoner prompt version")
     p.add_argument("--judge", choices=["none", "claude", "autoevals", "both"], default="none")
     p.add_argument("--judge-model", default="claude-opus-5")
+    p.add_argument("--checker", choices=["none", "julia", "jev"], default="none",
+                   help="decision model for the yes/no plan rubric (needs --extra julia / --extra jev)")
+    p.add_argument("--julia-checkpoint", type=Path,
+                   help="Julia-1 download (default: $JULIA_CHECKPOINT or ../julia-1-benchmarks/Julia-1)")
+    p.add_argument("--jev-model", default="jev-latest")
     p.add_argument("--limit", type=int, help="first N fixtures only (cheap smoke runs)")
     p.add_argument("--name", help="experiment name (default: derived from the settings)")
     p.add_argument("--gate", action="store_true")
@@ -105,7 +126,8 @@ def main():
     rows = to_eval_rows(load_fixtures())[: args.limit]
     reasoner = build_reasoner(args)
     label = args.reasoner if args.reasoner != "claude" else f"claude-{args.prompt}"
-    name = args.name or f"{label}__judge-{args.judge}__{datetime.now(timezone.utc):%Y%m%dT%H%M%S}"
+    check = f"__check-{args.checker}" if args.checker != "none" else ""
+    name = args.name or f"{label}__judge-{args.judge}{check}__{datetime.now(timezone.utc):%Y%m%dT%H%M%S}"
 
     result = Eval(
         "agent-hound",
@@ -113,7 +135,8 @@ def main():
         data=lambda: rows,
         task=lambda input: run_harness(input, reasoner),
         scores=build_scorers(args),
-        metadata={"reasoner": label, "judge": args.judge, "judge_model": args.judge_model},
+        metadata={"reasoner": label, "judge": args.judge, "judge_model": args.judge_model,
+                  "checker": args.checker},
         max_concurrency=4,
         no_send_logs=not os.environ.get("BRAINTRUST_API_KEY"),
     )

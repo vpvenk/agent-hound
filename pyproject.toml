@@ -16,3 +16,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agenthound"]
+
+[project.optional-dependencies]
+# Decision-model rubric checkers (src/agenthound/evals/checker.py). Heavy, so opt-in.
+# julia: Julia-1's runtime deps. The julia package itself ships inside the downloaded
+# checkpoint folder and is imported from there (see README).
+julia = ["torch>=2.6", "transformers>=5.0,<5.1", "safetensors>=0.5", "numpy>=1.26"]
+jev = ["typesafe-sdk==0.6.0"]

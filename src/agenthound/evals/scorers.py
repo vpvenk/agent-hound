@@ -11,6 +11,7 @@ Three kinds, cheapest first:
                             ClaudeJudge     our code, Anthropic SDK
                             autoevals_judge autoevals LLMClassifier, same rubric, routed through LiteLLM
   factuality              autoevals' built-in Factuality, off the shelf, for comparison
+  RubricScorer            decision model (Julia-1 / Jev) answers the yes/no plan checks in checker.py
 """
 
 from typing import Literal
@@ -147,3 +148,28 @@ def make_autoevals_scorers(model: str = "anthropic/claude-opus-5") -> list:
 
     factuality_scorer.__name__ = "factuality"
     return [autoevals_judge, factuality_scorer]
+
+
+# --- 4. rubric checks by a decision model -------------------------------------
+
+class RubricScorer:
+    """One score per PLAN_RUBRIC check (P(yes) from the decision model), plus the pass rate.
+
+    Each check is its own named score so a run shows which checks fire, and a hand-labelled
+    set can later measure the checker per question, not just overall.
+    """
+
+    def __init__(self, checker):
+        self.checker = checker
+
+    def __call__(self, input, output, expected, metadata, **_):
+        from agenthound.evals.checker import render_state
+
+        probs = self.checker.check(render_state(input, output["plan"]))
+        passed = [qid for qid, p in probs.items() if p >= 0.5]
+        _result("rubric", len(passed) / len(probs), metadata["id"], checker=self.checker.name,
+                checker_model=self.checker.model, probabilities=probs,
+                failed=[qid for qid in probs if qid not in passed])
+        return [{"name": "rubric_pass_rate", "score": len(passed) / len(probs)}] + [
+            {"name": f"rubric:{qid}", "score": p} for qid, p in probs.items()
+        ]
